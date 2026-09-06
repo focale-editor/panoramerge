@@ -125,6 +125,13 @@ final class PanoramaStitcherOptions {
   /// Whether RGB overlap means are equalized before seam blending.
   final bool compensateExposure;
 
+  /// Whether the result retains each aligned source and its editable seam mask.
+  ///
+  /// Disabled by default because retaining one panorama-sized raster per
+  /// source can be substantially more expensive than returning the flattened
+  /// composite alone.
+  final bool includeSourceLayers;
+
   /// Maximum aggregate source area accepted by one operation.
   final int maximumInputPixels;
 
@@ -177,6 +184,7 @@ final class PanoramaStitcherOptions {
     this.registrationMaximumDimension = 2400,
     this.cropTransparentBorders = true,
     this.compensateExposure = true,
+    this.includeSourceLayers = false,
     this.maximumInputPixels = 400 * 1000 * 1000,
     this.maximumInputBytes = 1024 * 1024 * 1024,
     this.maximumOutputPixels = 200 * 1000 * 1000,
@@ -291,6 +299,13 @@ final class PanoramaResult {
   /// Original-source mappings aligned with the input list.
   final List<PanoramaSourceTransform> sourceTransforms;
 
+  /// Aligned source rasters in bottom-to-top composition order.
+  ///
+  /// Empty unless [PanoramaStitcherOptions.includeSourceLayers] was enabled.
+  /// The first entry needs no mask; each later entry owns the portion selected
+  /// by its seam mask while lower entries remain visible underneath.
+  final List<PanoramaSourceLayer> sourceLayers;
+
   /// Feature and overlap evidence useful for troubleshooting.
   final PanoramaDiagnostics diagnostics;
 
@@ -299,8 +314,40 @@ final class PanoramaResult {
     required this.raster,
     required this.projection,
     required List<PanoramaSourceTransform> sourceTransforms,
+    List<PanoramaSourceLayer> sourceLayers = const [],
     required this.diagnostics,
-  }) : sourceTransforms = List<PanoramaSourceTransform>.unmodifiable(sourceTransforms);
+  }) : sourceTransforms = List<PanoramaSourceTransform>.unmodifiable(sourceTransforms),
+       sourceLayers = List<PanoramaSourceLayer>.unmodifiable(sourceLayers);
+}
+
+/// One aligned panorama source and the mask that reveals it over lower layers.
+final class PanoramaSourceLayer {
+  /// Index of the corresponding raster in the original input list.
+  final int sourceIndex;
+
+  /// Source pixels projected, registered, and exposure-compensated on the
+  /// final panorama canvas.
+  final PanoramaRaster raster;
+
+  /// One grayscale byte per output pixel, or `null` for the bottom layer.
+  ///
+  /// Zero hides the source and 255 reveals it. Intermediate values are
+  /// retained when a seam implementation produces fractional ownership.
+  final Uint8List? mask;
+
+  /// Creates one immutable editable-layer result.
+  PanoramaSourceLayer({
+    required this.sourceIndex,
+    required this.raster,
+    Uint8List? mask,
+  }) : mask = mask == null ? null : Uint8List.fromList(mask).asUnmodifiableView() {
+    if (sourceIndex < 0) {
+      throw ArgumentError.value(sourceIndex, 'sourceIndex', 'must not be negative');
+    }
+    if (this.mask case final Uint8List values when values.lengthInBytes != raster.pixelCount) {
+      throw ArgumentError.value(values.lengthInBytes, 'mask', 'must contain one byte per raster pixel');
+    }
+  }
 }
 
 /// Orchestrates pure Dart projection, registration, seam finding, and blending.
@@ -405,12 +452,18 @@ final class PanoramaStitcher {
 
     final DynamicProgrammingSeamFinder seamFinder = DynamicProgrammingSeamFinder(options: options.seamFinder);
     final MultibandBlender blender = MultibandBlender(options: options.blender);
+    final int firstSourceIndex = global.compositionOrder.first;
     FloatRaster composite = _warp(
-      projected[global.compositionOrder.first].raster,
-      canvasTransforms[global.compositionOrder.first],
+      projected[firstSourceIndex].raster,
+      canvasTransforms[firstSourceIndex],
       canvas.width,
       canvas.height,
     );
+    final List<FloatRaster?> retainedSources = options.includeSourceLayers ? List<FloatRaster?>.filled(sources.length, null) : const [];
+    final List<Float32List?> retainedMasks = options.includeSourceLayers ? List<Float32List?>.filled(sources.length, null) : const [];
+    if (options.includeSourceLayers) {
+      retainedSources[firstSourceIndex] = composite;
+    }
     _report(onProgress, PanoramaStage.warping, 1, sources.length);
     for (int orderIndex = 1; orderIndex < global.compositionOrder.length; orderIndex++) {
       final int sourceIndex = global.compositionOrder[orderIndex];
@@ -429,6 +482,10 @@ final class PanoramaStitcher {
         incoming,
         colorModel: sources.first.pixelFormat.colorModel,
       );
+      if (options.includeSourceLayers) {
+        retainedSources[sourceIndex] = incoming;
+        retainedMasks[sourceIndex] = seam.incomingWeights;
+      }
       _report(onProgress, PanoramaStage.seamFinding, orderIndex, sources.length - 1);
       composite = blender.blendFloat(composite, incoming, seamMask: seam);
       _report(onProgress, PanoramaStage.blending, orderIndex, sources.length - 1);
@@ -445,6 +502,21 @@ final class PanoramaStitcher {
       pixelFormat: sources.first.pixelFormat,
       components: cropped.raster.components,
     );
+    final List<PanoramaSourceLayer> sourceLayers = options.includeSourceLayers
+        ? [
+            for (final int sourceIndex in global.compositionOrder)
+              _editableSourceLayer(
+                sourceIndex: sourceIndex,
+                source: retainedSources[sourceIndex],
+                mask: retainedMasks[sourceIndex],
+                left: cropped.left,
+                top: cropped.top,
+                width: cropped.raster.width,
+                height: cropped.raster.height,
+                pixelFormat: sources.first.pixelFormat,
+              ),
+          ]
+        : const [];
     _report(onProgress, PanoramaStage.encoding, 1, 1);
     return PanoramaResult(
       raster: output,
@@ -456,6 +528,7 @@ final class PanoramaStitcher {
             projectedToPanorama: cropTranslation.compose(canvasTransforms[index]),
           ),
       ],
+      sourceLayers: sourceLayers,
       diagnostics: PanoramaDiagnostics(
         featureCounts: [for (final _RegistrationFeatures featureSet in features) featureSet.features.length],
         pairwiseRegistrations: registration.diagnostics,
@@ -783,10 +856,13 @@ final class PanoramaStitcher {
       (total, image) => total + image.raster.width * image.raster.height * pixelFormat.channelCount * Float32List.bytesPerElement,
     );
     final int canvasWorkingBytes = pixelCount * pixelFormat.channelCount * Float32List.bytesPerElement * 12;
-    if (sourceWorkingBytes + canvasWorkingBytes > options.maximumWorkingBytes) {
+    final int editableOutputBytes = options.includeSourceLayers
+        ? pixelCount * images.length * (pixelFormat.channelCount * Float32List.bytesPerElement + pixelFormat.bytesPerPixel + Float32List.bytesPerElement + 2)
+        : 0;
+    if (sourceWorkingBytes + canvasWorkingBytes + editableOutputBytes > options.maximumWorkingBytes) {
       throw PanoramaException(
         code: PanoramaFailureCode.workingSetTooLarge,
-        message: 'Estimated floating working set exceeds ${options.maximumWorkingBytes} bytes; reduce dimensions, blend levels, or raise the explicit limit.',
+        message: 'Estimated floating and editable-output working set exceeds ${options.maximumWorkingBytes} bytes; reduce dimensions, source count, blend levels, or raise the explicit limit.',
       );
     }
     return _CanvasGeometry(
@@ -830,6 +906,100 @@ final class PanoramaStitcher {
       for (int x = left; x <= right; x++) {
         final Point2 sample = inverse.transform(Point2(x: x.toDouble(), y: y.toDouble()));
         _sampleBilinear(source, sample.x, sample.y, output, x, y);
+      }
+    }
+    return output;
+  }
+
+  /// Converts one retained aligned source into a cropped editable layer.
+  PanoramaSourceLayer _editableSourceLayer({
+    required int sourceIndex,
+    required FloatRaster? source,
+    required Float32List? mask,
+    required int left,
+    required int top,
+    required int width,
+    required int height,
+    required PanoramaPixelFormat pixelFormat,
+  }) {
+    if (source == null) {
+      throw StateError('Panorama source $sourceIndex was not retained');
+    }
+    final FloatRaster croppedSource = _cropRaster(
+      source,
+      left: left,
+      top: top,
+      width: width,
+      height: height,
+    );
+    return PanoramaSourceLayer(
+      sourceIndex: sourceIndex,
+      raster: PanoramaRaster.fromPremultipliedComponents(
+        width: width,
+        height: height,
+        pixelFormat: pixelFormat,
+        components: croppedSource.components,
+      ),
+      mask: mask == null
+          ? null
+          : _cropMask(
+              mask,
+              sourceWidth: source.width,
+              left: left,
+              top: top,
+              width: width,
+              height: height,
+            ),
+    );
+  }
+
+  /// Crops one canvas-aligned floating raster without changing its samples.
+  FloatRaster _cropRaster(
+    FloatRaster source, {
+    required int left,
+    required int top,
+    required int width,
+    required int height,
+  }) {
+    if (left == 0 && top == 0 && width == source.width && height == source.height) {
+      return source;
+    }
+    final int channelCount = source.channelCount;
+    final int rowLength = width * channelCount;
+    final Float32List values = Float32List(width * height * channelCount);
+    for (int y = 0; y < height; y++) {
+      final int sourceOffset = ((top + y) * source.width + left) * channelCount;
+      final int destinationOffset = y * rowLength;
+      values.setRange(
+        destinationOffset,
+        destinationOffset + rowLength,
+        source.components,
+        sourceOffset,
+      );
+    }
+    return FloatRaster(
+      width: width,
+      height: height,
+      channelCount: channelCount,
+      components: values,
+    );
+  }
+
+  /// Quantizes and crops fractional seam ownership into one-byte mask samples.
+  Uint8List _cropMask(
+    Float32List source, {
+    required int sourceWidth,
+    required int left,
+    required int top,
+    required int width,
+    required int height,
+  }) {
+    final Uint8List output = Uint8List(width * height);
+    for (int y = 0; y < height; y++) {
+      final int sourceRow = (top + y) * sourceWidth + left;
+      final int destinationRow = y * width;
+      for (int x = 0; x < width; x++) {
+        output[destinationRow + x] = (source[sourceRow + x].clamp(0.0, 1.0) * 255).round();
       }
     }
     return output;

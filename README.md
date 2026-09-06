@@ -2,8 +2,9 @@
 
 Panoramerge is a pure Dart panorama engine. It takes already decoded,
 overlapping rasters and returns one registered, seamed, multiband-blended
-canonical raster. It has no Flutter, codec, OpenCV, FFI, or platform runtime
-dependency.
+canonical raster. On request it also retains each aligned source and its seam
+mask so an image editor can build an editable layer stack. It has no Flutter,
+codec, OpenCV, FFI, or platform runtime dependency.
 
 The implementation includes:
 
@@ -73,6 +74,7 @@ Future<PanoramaResult> mergeDecodedImages(
     options: PanoramaStitcherOptions(
       projection: PanoramaProjection.automatic,
       cropTransparentBorders: true,
+      includeSourceLayers: true,
     ),
   ).stitchAsync([first, second]);
 }
@@ -83,3 +85,11 @@ equivalent and accepts a progress callback. A successful `PanoramaResult`
 contains the output raster, each original-source-to-output mapping, feature
 counts, pairwise match/inlier evidence, the chosen reference source, and the
 composition order.
+
+With `includeSourceLayers`, `PanoramaResult.sourceLayers` contains one
+full-canvas `PanoramaSourceLayer` per input, ordered from bottom to top. Each
+item owns its projected, exposure-compensated canonical raster and, except for
+the base layer, a one-byte grayscale seam mask. The ordinary flattened raster
+remains available for preview, export, and pixel-parity checks. Editable output
+is disabled by default because retaining both representations and the floating
+projections until transfer increases the byte-accounted working set.

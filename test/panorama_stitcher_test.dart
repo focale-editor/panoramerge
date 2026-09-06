@@ -48,6 +48,108 @@ void main() {
     expect(result.diagnostics.pairwiseRegistrations.single.inlierCount, greaterThan(10));
   });
 
+  test('optionally retains aligned source layers and seam masks', () {
+    // Arrange.
+    final List<PanoramaRaster> sources = _translatedSources(
+      PanoramaPixelFormat.rgba8,
+    );
+    const PanoramaStitcher stitcher = PanoramaStitcher(
+      options: PanoramaStitcherOptions(
+        projection: PanoramaProjection.translation,
+        includeSourceLayers: true,
+        minimumPairMatches: 6,
+        minimumPairInliers: 6,
+        featureDetector: OrbFeatureDetectorOptions(
+          maximumFeatures: 600,
+          pyramidLevels: 3,
+          distributionCellSize: 24,
+        ),
+        featureMatcher: FeatureMatcherOptions(
+          maximumHammingDistance: 72,
+          ratioThreshold: 0.82,
+        ),
+        blender: MultibandBlenderOptions(
+          maximumLevels: 4,
+          minimumLevelDimension: 12,
+        ),
+      ),
+    );
+
+    // Act.
+    final PanoramaResult result = stitcher.stitch(sources);
+
+    // Assert.
+    expect(result.sourceLayers, hasLength(2));
+    expect(result.sourceLayers.first.mask, isNull);
+    final PanoramaSourceLayer upper = result.sourceLayers.last;
+    expect(upper.mask, hasLength(result.raster.pixelCount));
+    expect(upper.raster.width, result.raster.width);
+    expect(upper.raster.height, result.raster.height);
+    expect(
+      result.sourceLayers.map((layer) => layer.sourceIndex).toSet(),
+      {0, 1},
+    );
+    expect(upper.mask, contains(0));
+    expect(upper.mask, contains(255));
+  });
+
+  test('editable source buffers participate in the working-set bound', () {
+    // Arrange.
+    final List<PanoramaRaster> sources = _translatedSources(
+      PanoramaPixelFormat.rgba8,
+    );
+    const PanoramaStitcherOptions flattenedOptions = PanoramaStitcherOptions(
+      projection: PanoramaProjection.translation,
+      maximumWorkingBytes: 5 * 1024 * 1024,
+      minimumPairMatches: 6,
+      minimumPairInliers: 6,
+      featureDetector: OrbFeatureDetectorOptions(
+        maximumFeatures: 600,
+        pyramidLevels: 3,
+        distributionCellSize: 24,
+      ),
+      featureMatcher: FeatureMatcherOptions(
+        maximumHammingDistance: 72,
+        ratioThreshold: 0.82,
+      ),
+    );
+
+    // Act.
+    final PanoramaResult flattened = const PanoramaStitcher(
+      options: flattenedOptions,
+    ).stitch(sources);
+
+    // Assert.
+    expect(flattened.sourceLayers, isEmpty);
+    expect(
+      () => const PanoramaStitcher(
+        options: PanoramaStitcherOptions(
+          projection: PanoramaProjection.translation,
+          includeSourceLayers: true,
+          maximumWorkingBytes: 5 * 1024 * 1024,
+          minimumPairMatches: 6,
+          minimumPairInliers: 6,
+          featureDetector: OrbFeatureDetectorOptions(
+            maximumFeatures: 600,
+            pyramidLevels: 3,
+            distributionCellSize: 24,
+          ),
+          featureMatcher: FeatureMatcherOptions(
+            maximumHammingDistance: 72,
+            ratioThreshold: 0.82,
+          ),
+        ),
+      ).stitch(sources),
+      throwsA(
+        isA<PanoramaException>().having(
+          (error) => error.code,
+          'code',
+          PanoramaFailureCode.workingSetTooLarge,
+        ),
+      ),
+    );
+  });
+
   test('ORB and homography align rotated perspective views', () {
     // Arrange.
     final List<PanoramaRaster> sources = _rotatedPerspectiveSources();

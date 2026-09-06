@@ -29,6 +29,8 @@ costs.
     bands. Repeat in spanning-tree order and encode the canonical format once.
 12. Crop transparent borders when requested and update every returned source
     transform to the cropped origin.
+13. When editable output was requested, crop every projected source and seam
+    mask to the same final canvas and transfer them in composition order.
 
 ## Coordinate conventions
 
@@ -72,6 +74,10 @@ pixel and canonical-byte limits default to Focale's aggregate-input and
 single-raster bounds. A separate working-set estimate guards the larger
 floating pyramids. High-depth and CMYK rasters consume more working memory
 because pyramid arithmetic uses one float per process component.
+The estimate also accounts for retained floating projections and seam masks,
+canonical source rasters, and the peak copies of quantized one-byte masks when
+`includeSourceLayers` is enabled. The default flattened workflow therefore
+pays no editable-output allocation cost.
 
 Feature evidence is area-downsampled when a source exceeds
 `registrationMaximumDimension` (2400 pixels by default). Returned keypoint
