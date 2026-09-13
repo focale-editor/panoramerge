@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="screenshots/overview.png" alt="Panoramerge package illustration" width="180">
+</p>
+
 # Panoramerge
 
 Panoramerge is a pure Dart panorama engine. It takes already decoded,
@@ -93,3 +97,7 @@ the base layer, a one-byte grayscale seam mask. The ordinary flattened raster
 remains available for preview, export, and pixel-parity checks. Editable output
 is disabled by default because retaining both representations and the floating
 projections until transfer increases the byte-accounted working set.
+
+---
+
+Built for **[Focale](https://focale-editor.app)**, an advanced local image editor. Discover what these packages make possible in a real creative workflow.

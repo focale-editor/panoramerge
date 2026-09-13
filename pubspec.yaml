@@ -4,6 +4,17 @@ version: 0.1.1
 homepage: https://github.com/focale-editor/panoramerge
 repository: https://github.com/focale-editor/panoramerge
 
+topics:
+  - panorama
+  - image-stitching
+  - computer-vision
+  - image-processing
+  - photography
+
+screenshots:
+  - description: 'A flat illustration of panorama alignment and blending.'
+    path: screenshots/overview.png
+
 environment:
   sdk: '>=3.13.0 <4.0.0'
 
